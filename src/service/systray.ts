@@ -276,6 +276,8 @@ class SystemTrayService extends Service {
 
     get_icon(item: StatusNotifierItemProxy, size?: number) {
         const icon = new AgsIcon({});
+        if (item.IconThemePath)
+            Gtk.IconTheme.get_default().append_search_path(item.IconThemePath);
         const iconSize = size || icon.get_style_context()
             .get_property('font-size', Gtk.StateFlags.NORMAL) as number;
         if (item.IconName || item.AttentionIconName) {
