@@ -133,7 +133,7 @@ function parseCommon(widget: Gtk.Widget, {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ctor = { new(...args: any[]): Gtk.Widget }
-export function constructor(
+export default function constructor(
     ctor: ctor,
     params: CommonParams | string = {},
 ) {
