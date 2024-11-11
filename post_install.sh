@@ -8,7 +8,7 @@ APP_ID=$4
 mkdir -p $BIN_DIR
 
 BIN_SRC="$PKGDATA_DIR/$APP_ID"
-BIN_DEST="$BIN_DIR/ags"
+BIN_DEST="$BIN_DIR/ags1"
 ln -s -r -f $BIN_SRC $BIN_DEST
 
 if [[ "$5" == "false" ]]; then
