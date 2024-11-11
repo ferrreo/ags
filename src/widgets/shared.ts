@@ -40,19 +40,19 @@ function separateCommon({
 function parseCommon(widget: Gtk.Widget, {
     className, style,
     halign, valign,
-    connections, properties, setup,
+    connections = [], properties, binds, setup,
 }: CommonParams) {
     if (className !== undefined)
-        // @ts-ignore
+        // @ts-expect-error
         widget.className = className;
 
     if (style !== undefined)
-        // @ts-ignore
+        // @ts-expect-error
         widget.style = style;
 
 
     if (typeof halign === 'string') {
-        // @ts-ignore
+        // @ts-expect-error
         const align = Gtk.Align[halign.toUpperCase()];
         if (typeof align !== 'number')
             console.error('wrong halign value');
@@ -64,7 +64,7 @@ function parseCommon(widget: Gtk.Widget, {
         widget.halign = halign;
 
     if (typeof valign === 'string') {
-        // @ts-ignore
+        // @ts-expect-error
         const align = Gtk.Align[valign.toUpperCase()];
         if (typeof align !== 'number')
             console.error('wrong valign value');
@@ -77,13 +77,33 @@ function parseCommon(widget: Gtk.Widget, {
 
     if (properties) {
         properties.forEach(([key, value]) => {
-            // @ts-ignore
+            // @ts-expect-error
             widget[`_${key}`] = value;
+        });
+    }
+
+    if (binds) {
+        binds.forEach(([prop, obj, value = 'value', signal = 'changed']) => {
+            if (!prop || !obj) {
+                logError(new Error('missing arguments to connections'));
+                return;
+            }
+
+            const callback = () => {
+                // @ts-expect-error
+                widget[prop] = obj[value];
+            };
+            connections.push([obj, callback, signal]);
         });
     }
 
     if (connections) {
         connections.forEach(([s, callback, event]) => {
+            if (!s || !callback) {
+                logError(new Error('missing arguments to connections'));
+                return;
+            }
+
             if (typeof s === 'string')
                 widget.connect(s, callback);
 
@@ -93,8 +113,14 @@ function parseCommon(widget: Gtk.Widget, {
             else if (typeof s?.instance?.connectWidget === 'function')
                 s.instance.connectWidget(widget, callback, event);
 
+            else if (typeof s?.connectWidget === 'function')
+                s.connectWidget(widget, callback, event);
+
+            else if (typeof s?.connect === 'function')
+                connect(s, widget, callback, event);
+
             else
-                logError(new Error(`${s} is not an instanceof Service`));
+                logError(new Error(`${s} is not connectable`));
         });
     }
 
