@@ -269,6 +269,10 @@ class SystemTrayService extends Service {
 export default class SystemTray {
     static _instance: SystemTrayService;
 
+    static {
+        Service.export(this, 'SystemTray');
+    }
+
     static get instance() {
         Service.ensureInstance(SystemTray, SystemTrayService);
         return SystemTray._instance;
