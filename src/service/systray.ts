@@ -1,42 +1,206 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import GdkPixbuf from 'gi://GdkPixbuf';
-import Dbusmenu from 'gi://Dbusmenu';
-import Service from './service.js';
-import {
-    StatusNotifierItemProxy,
-} from '../dbus/types.js';
-import { Label, MenuItem } from '../widget.js';
-import { AgsMenu, AgsMenuItem } from '../widgets/menu.js';
+import Gdk from 'gi://Gdk?version=3.0';
 import Gtk from 'gi://Gtk?version=3.0';
-import AgsIcon from '../widgets/icon.js';
-import { loadInterfaceXML } from '../utils.js';
+import GdkPixbuf from 'gi://GdkPixbuf';
+import DbusmenuGtk3 from 'gi://DbusmenuGtk3';
+import Service from './service.js';
+import { StatusNotifierItemProxy } from '../dbus/types.js';
+import { bulkConnect, loadInterfaceXML } from '../utils.js';
+import Widget from '../widget.js';
 
-const StatusNotifierWatcherIFace =
-    loadInterfaceXML('org.kde.StatusNotifierWatcher');
+const StatusNotifierWatcherIFace = loadInterfaceXML('org.kde.StatusNotifierWatcher');
 const StatusNotifierItemIFace = loadInterfaceXML('org.kde.StatusNotifierItem');
-const StatusNotifierItemProxy = Gio.DBusProxy
-    .makeProxyWrapper(StatusNotifierItemIFace) as StatusNotifierItemProxy;
+const StatusNotifierItemProxy =
+    Gio.DBusProxy.makeProxyWrapper(StatusNotifierItemIFace) as StatusNotifierItemProxy;
+
+export class TrayItem extends Service {
+    static {
+        Service.register(this, {
+            'removed': ['string'],
+            'ready': [],
+        });
+    }
+
+    private _proxy: StatusNotifierItemProxy;
+    private _busName: string;
+
+    private _iconTheme?: Gtk.IconTheme;
+    menu?: DbusmenuGtk3.Menu;
+
+    constructor(busName: string, objectPath: string) {
+        super();
+
+        this._busName = busName;
+
+        this._proxy = new StatusNotifierItemProxy(
+            Gio.DBus.session,
+            busName,
+            objectPath,
+            this._itemProxyAcquired.bind(this),
+            null,
+            Gio.DBusProxyFlags.NONE);
+    }
+
+    activate(event: Gdk.Event) {
+        this._proxy.ActivateAsync(event.get_root_coords()[1], event.get_root_coords()[2]);
+    }
+
+    secondaryActivate(event: Gdk.Event) {
+        this._proxy.SecondaryActivateAsync(event.get_root_coords()[1], event.get_root_coords()[2]);
+    }
+
+    scroll(event: Gdk.EventScroll) {
+        const direction = (event.direction == 0 || event.direction == 1)
+            ? 'vertical' : 'horizontal';
+
+        const delta = (event.direction == 0 || event.direction == 1)
+            ? event.delta_y : event.delta_x;
+
+        this._proxy.ScrollAsync(delta, direction);
+    }
+
+    openMenu(event: Gdk.Event) {
+        this.menu // DbusmenuGtk3 imports the gdk type from @girs
+            ? (this.menu as unknown as Gtk.Menu).popup_at_pointer(event)
+            : this._proxy.ContextMenuAsync(event.get_root_coords()[1], event.get_root_coords()[2]);
+    }
+
+    get category() { return this._proxy.Category; }
+    get id() { return this._proxy.Id; }
+    get title() { return this._proxy.Title; }
+    get status() { return this._proxy.Status; }
+    get windowId() { return this._proxy.WindowId; }
+    get isMenu() { return this._proxy.ItemIsMenu; }
+
+    get tooltipMarkup() {
+        if (!this._proxy.ToolTip)
+            return '';
+
+        let tooltipMarkup = this._proxy.ToolTip[2];
+        if (this._proxy.ToolTip[3] !== '')
+            tooltipMarkup += '\n' + this._proxy.ToolTip[3];
+
+        return tooltipMarkup;
+    }
+
+    get icon() {
+        const iconName = this.status === 'NeedsAttention'
+            ? this._proxy.AttentionIconName
+            : this._proxy.IconName;
+
+        if (this._iconTheme && iconName) {
+            const size = Math.max(...this._iconTheme.get_icon_sizes(iconName));
+            const iconInfo = this._iconTheme.lookup_icon(
+                iconName, size, Gtk.IconLookupFlags.FORCE_SIZE);
+
+            if (iconInfo)
+                return iconInfo.load_icon();
+        }
+        const iconPixmap = this.status === 'NeedsAttention'
+            ? this._proxy.AttentionIconPixmap
+            : this._proxy.IconPixmap;
+
+        return iconName || this._getPixbuf(iconPixmap) || 'image-missing';
+    }
+
+    private _itemProxyAcquired(proxy: StatusNotifierItemProxy) {
+        if (proxy.Menu) {
+            const menu = Widget({
+                // @ts-expect-error
+                type: DbusmenuGtk3.Menu,
+                dbus_name: proxy.g_name_owner,
+                dbus_object: proxy.Menu,
+            });
+            this.menu = (menu as unknown) as DbusmenuGtk3.Menu;
+        }
+
+        if (this._proxy.IconThemePath) {
+            this._iconTheme = Gtk.IconTheme.new();
+            this._iconTheme?.set_search_path([this._proxy.IconThemePath]);
+        }
+
+        bulkConnect(proxy, [
+            ['notify::g-name-owner', () => {
+                if (!proxy.g_name_owner)
+                    this.emit('removed', this._busName);
+            }],
+            ['g-signal', () => {
+                this._refreshAllProperties();
+                this.emit('changed');
+            }],
+            ['g-properties-changed', () => this.emit('changed')],
+        ]);
+
+        ['Title', 'Icon', 'AttentionIcon', 'OverlayIcon', 'ToolTip', 'Status']
+            .forEach(prop => proxy.connectSignal(`New${prop}`, () => {
+                this.emit('changed');
+            }));
+
+        this.emit('ready');
+    }
+
+    private _refreshAllProperties() {
+        const variant = this._proxy.g_connection.call_sync(
+            this._proxy.g_name,
+            this._proxy.g_object_path,
+            'org.freedesktop.DBus.Properties',
+            'GetAll',
+            GLib.Variant.new('(s)', [this._proxy.g_interface_name]),
+            GLib.VariantType.new('(a{sv})'),
+            Gio.DBusCallFlags.NONE, -1,
+            null,
+        ) as GLib.Variant<'(a{sv})'>;
+
+        const [properties] = variant.deep_unpack();
+        Object.entries(properties).map(([propertyName, value]) => {
+            this._proxy.set_cached_property(propertyName, value);
+        });
+    }
+
+    private _getPixbuf(pixMapArray: [number, number, Uint8Array][]) {
+        if (!pixMapArray)
+            return;
+
+        const pixMap = pixMapArray.sort((a, b) => a[0] - b[0]).pop();
+        if (!pixMap)
+            return;
+
+        const array = Uint8Array.from(pixMap[2]);
+        for (let i = 0; i < 4 * pixMap[0] * pixMap[1]; i += 4) {
+            const alpha = array[i];
+            array[i] = array[i + 1];
+            array[i + 1] = array[i + 2];
+            array[i + 2] = array[i + 3];
+            array[i + 3] = alpha;
+        }
+        return GdkPixbuf.Pixbuf.new_from_bytes(
+            array,
+            GdkPixbuf.Colorspace.RGB,
+            true,
+            8,
+            pixMap[0],
+            pixMap[1],
+            pixMap[0] * 4,
+        );
+    }
+}
 
 class SystemTrayService extends Service {
     static {
-        Service.register(this);
+        Service.register(this, {
+            'added': ['string'],
+            'removed': ['string'],
+        });
     }
 
-    _dbus!: Gio.DBusExportedObject;
-    _items: Map<string, StatusNotifierItemProxy>;
+    private _dbus!: Gio.DBusExportedObject;
+    private _items: Map<string, TrayItem>;
 
-    get IsStatusNotifierHostRegistered() {
-        return true;
-    }
-
-    get ProtocolVersion() {
-        return 0;
-    }
-
-    get RegisteredStatusNotifierItems() {
-        return Array.from(this._items.keys());
-    }
+    get IsStatusNotifierHostRegistered() { return true; }
+    get ProtocolVersion() { return 0; }
+    get RegisteredStatusNotifierItems() { return Array.from(this._items.keys()); }
+    get items() { return this._items; }
 
     constructor() {
         super();
@@ -44,7 +208,7 @@ class SystemTrayService extends Service {
         this._register();
     }
 
-    _register() {
+    private _register() {
         Gio.bus_own_name(
             Gio.BusType.SESSION,
             'org.kde.StatusNotifierWatcher',
@@ -62,8 +226,7 @@ class SystemTrayService extends Service {
         );
     }
 
-    RegisterStatusNotifierItemAsync(
-        serviceName: string, invocation: Gio.DBusMethodInvocation) {
+    RegisterStatusNotifierItemAsync(serviceName: string[], invocation: Gio.DBusMethodInvocation) {
         let busName: string, objectPath: string;
         const [service] = serviceName;
         if (service.startsWith('/')) {
@@ -76,239 +239,34 @@ class SystemTrayService extends Service {
 
         invocation.return_value(null);
 
-        new StatusNotifierItemProxy(
-            Gio.DBus.session,
-            busName,
-            objectPath,
-            this._item_proxy_acquired.bind(this),
-            null,
-            Gio.DBusProxyFlags.NONE);
-    }
-
-    _item_proxy_acquired(proxy: StatusNotifierItemProxy, error: any) {
-        if (error !== null)
-            return;
-        const busName = proxy.g_name_owner;
-        const objectPath = proxy.g_object_path;
-        this._items.set(busName + objectPath, proxy);
-        proxy.AgsMenu = new AgsMenu({ children: [] });
-        if (proxy.Menu)
-            proxy.DbusMenusClient = this._createMenu(proxy);
-        proxy.connect('g-signal', this._on_item_signal.bind(this));
-        proxy.connect('notify::g-name-owner',
-            (_proxy: StatusNotifierItemProxy, params: any) => {
-                if (_proxy.g_name_owner != null)
-                    return;
-                const [key, _] = Array.from(
-                    this._items.entries())
-                    .find(value => value[1] === _proxy) || [];
-                if (!key)
-                    return;
-                this._items.delete(key);
-                this._dbus.emit_signal(
-                    'StatusNotifierItemUnregistered',
-                    new GLib.Variant('(s)', [key]));
-                this.emit('changed');
-            });
-        this._dbus.emit_signal(
-            'StatusNotifierItemRegistered',
-            new GLib.Variant('(s)', [busName + objectPath]));
-
-        this.emit('changed');
-    }
-
-    _on_item_signal(
-        proxy: StatusNotifierItemProxy,
-        senderName: string,
-        signalName: string,
-        parameters: GLib.Variant<any>) {
-        if (signalName === 'NewTitle') {
-            this._refresh_property(proxy, 'Title');
+        const item = new TrayItem(busName, objectPath);
+        item.connect('ready', () => {
+            this._items.set(busName, item);
+            this.emit('added', busName);
             this.emit('changed');
-        }
-        if (signalName === 'NewIcon') {
-            this._refresh_all_properties(proxy);
-            this.emit('changed');
-        }
-        if (signalName === 'NewToolTip') {
-            this._refresh_property(proxy, 'ToolTip');
-            this.emit('changed');
-        }
-        if (signalName === 'NewStatus') {
-            this._refresh_property(proxy, 'Status');
-            this.emit('changed');
-        }
-    }
-
-
-    _refresh_property(proxy: StatusNotifierItemProxy, property: string) {
-        if (!proxy[property])
-            return;
-        const [prop_value] = (proxy.g_connection.call_sync(
-            proxy.g_name,
-            proxy.g_object_path,
-            'org.freedesktop.DBus.Properties',
-            'Get',
-            GLib.Variant.new('(ss)',
-                [proxy.g_interface_name,
-                    property]),
-            GLib.VariantType.new('(v)'),
-            Gio.DBusCallFlags.NONE, -1,
-            null) as GLib.Variant<'(v)'>)
-            .deep_unpack();
-        this._update_property(proxy, property, prop_value);
-    }
-
-
-    _refresh_all_properties(proxy: StatusNotifierItemProxy) {
-        const [properties] =
-            (proxy.g_connection.call_sync(
-                proxy.g_name,
-                proxy.g_object_path,
-                'org.freedesktop.DBus.Properties',
-                'GetAll',
-                GLib.Variant.new('(s)',
-                    [proxy.g_interface_name]),
-                GLib.VariantType.new('(a{sv})'),
-                Gio.DBusCallFlags.NONE, -1,
-                null) as GLib.Variant<'(a{sv})'>)
-                .deep_unpack();
-        Object.entries(properties).map(
-            ([property_name, value]) => {
-                this._update_property(proxy, property_name, value);
-            });
-    }
-
-    _update_property(
-        proxy: StatusNotifierItemProxy,
-        property_name: string,
-        value: GLib.Variant<any>) {
-        proxy.set_cached_property(property_name, value);
-        if (property_name === 'Menu' && proxy.Menu !== value.unpack()) {
-            //new menu path, construct new proxy
-            proxy.DbusMenusClient = this._createMenu(proxy);
-        }
-    }
-
-    _createMenu(item: StatusNotifierItemProxy) {
-        const menu = new Dbusmenu.Client(
-            { dbus_name: item.g_name_owner, dbus_object: item.Menu });
-        menu.connect('layout-updated', (
-            client: Dbusmenu.Client) => {
-            const menu_items = this._createRootMenu(menu, client.get_root());
-            item.AgsMenu.children = menu_items;
-            item.AgsMenu.show_all();
+            this._dbus.emit_signal(
+                'StatusNotifierItemRegistered',
+                new GLib.Variant('(s)', [busName + objectPath]),
+            );
         });
-        return menu;
+        item.connect('removed', () => {
+            this._items.delete(busName);
+            this.emit('removed', busName);
+            this.emit('changed');
+            this._dbus.emit_signal(
+                'StatusNotifierItemUnregistered',
+                new GLib.Variant('(s)', [busName]),
+            );
+        });
     }
 
-    _createRootMenu(client: Dbusmenu.Client, dbusMenuItem: Dbusmenu.Menuitem) {
-        if (!dbusMenuItem ||
-            dbusMenuItem.property_get('children-display') !== 'submenu')
-            return [];
-        const menu_items: Gtk.Widget[] = [];
-        dbusMenuItem.get_children().forEach(dbitem =>
-            menu_items.push(this._createItem(client, dbitem)));
-        return menu_items;
-    }
-
-    _createItem(client: Dbusmenu.Client, dbusMenuItem: Dbusmenu.Menuitem) {
-        let menuItem;
-        if (dbusMenuItem.property_get('children-display') === 'submenu') {
-            menuItem = MenuItem({
-                child: Label({ label: dbusMenuItem.property_get('label') }),
-            }) as AgsMenuItem;
-            const submenu = new AgsMenu({ children: [] });
-            dbusMenuItem.get_children().forEach(dbitem =>
-                submenu.add(this._createItem(client, dbitem)));
-            menuItem.set_submenu(submenu);
-            menuItem.set_use_underline(true);
-        } else if (dbusMenuItem.property_get('type') === 'separator') {
-            menuItem = new Gtk.SeparatorMenuItem();
-        } else {
-            menuItem = MenuItem({
-                onActivate: (item: AgsMenuItem) => {
-                    dbusMenuItem.handle_event(
-                        'clicked',
-                        // @ts-ignore
-                        GLib.Variant.new('i', 0),
-                        Gtk.get_current_event_time());
-                },
-                child: Label({ label: dbusMenuItem.property_get('label') }),
-            }) as AgsMenuItem;
-            menuItem.set_use_underline(true);
-        }
-        return menuItem;
-    }
-
-    get_pixbuf(pixMapArray: [number, number, Uint8Array][], iconSize: number) {
-        if (!pixMapArray || !pixMapArray.length || !pixMapArray[0])
-            return;
-        const pixMap =
-            pixMapArray.sort((a, b) => a[0] - b[0])
-                .find(elem => elem[0] >= iconSize) || pixMapArray.pop();
-        if (!pixMap)
-            return;
-        const array: Uint8Array = Uint8Array.from(pixMap[2]);
-        for (let i = 0; i < 4 * pixMap[0] * pixMap[1]; i += 4) {
-            const alpha = array[i];
-            array[i] = array[i + 1];
-            array[i + 1] = array[i + 2];
-            array[i + 2] = array[i + 3];
-            array[i + 3] = alpha;
-        }
-        const pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
-            array,
-            GdkPixbuf.Colorspace.RGB,
-            true,
-            8,
-            pixMap[0],
-            pixMap[1],
-            pixMap[0] * 4);
-        const scale_pixbuf = pixbuf.scale_simple(
-            iconSize,
-            iconSize,
-            GdkPixbuf.InterpType.BILINEAR);
-        if (!scale_pixbuf)
-            return;
-        return scale_pixbuf;
-    }
-
-    get_icon(item: StatusNotifierItemProxy, size?: number) {
-        const icon = new AgsIcon({});
-        if (item.IconThemePath)
-            Gtk.IconTheme.get_default().append_search_path(item.IconThemePath);
-        const iconSize = size || icon.get_style_context()
-            .get_property('font-size', Gtk.StateFlags.NORMAL) as number;
-        if (item.IconName || item.AttentionIconName) {
-            icon.icon = item.AttentionIconName || item.IconName;
-        } else if (item.IconPixmap || item.AttentionIconPixmap) {
-            let buf = this.get_pixbuf(item.AttentionIconPixmap, iconSize);
-            if (!buf)
-                buf = this.get_pixbuf(item.IconPixmap, iconSize);
-            if (!buf)
-                return;
-            icon.set_from_pixbuf(buf);
-        }
-        return icon;
-    }
-
-    get_tooltip_markup(item: StatusNotifierItemProxy) {
-        if (!item.ToolTip)
-            return ''; //no tooltip
-        let tooltip_markup = item.ToolTip[2];
-        if (item.ToolTip[3] !== '')
-            tooltip_markup += '\n' + item.ToolTip[3];
-        return tooltip_markup;
+    getItem(name: string) {
+        return this._items.get(name);
     }
 }
 
 
 export default class SystemTray {
-    static {
-        Service.export(this, 'SystemTray');
-    }
-
     static _instance: SystemTrayService;
 
     static get instance() {
@@ -316,15 +274,6 @@ export default class SystemTray {
         return SystemTray._instance;
     }
 
-    static get items() {
-        return Array.from(SystemTray.instance._items.values());
-    }
-
-    static get_icon(item: StatusNotifierItemProxy, size?: number) {
-        return SystemTray.instance.get_icon(item, size);
-    }
-
-    static get_tooltip_markup(item: StatusNotifierItemProxy) {
-        return SystemTray.instance.get_tooltip_markup(item);
-    }
+    static get items() { return Array.from(SystemTray.instance.items.values()); }
+    static getItem(name: string) { return SystemTray._instance.getItem(name); }
 }
