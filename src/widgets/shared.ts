@@ -1,16 +1,18 @@
 import Gtk from 'gi://Gtk?version=3.0';
-import { interval } from '../utils.js';
+import GObject from 'gi://GObject';
+import { connect, interval } from '../utils.js';
 
-export type Command = string | ((...args: any[]) => boolean);
+export type Command = string | ((...args: unknown[]) => boolean);
 
-interface ServiceAPI {
-    instance: {
-        connectWidget: (
-            widget: Gtk.Widget,
-            callback: (widget: Gtk.Widget, ...args: any[]) => void,
-            event?: string
-        ) => void
-    }
+type ConnectWidget = (
+    widget: Gtk.Widget,
+    callback: (widget: Gtk.Widget, ...args: unknown[]) => void,
+    event?: string
+) => void
+
+interface Connectable extends GObject.Object {
+    instance: { connectWidget: ConnectWidget }
+    connectWidget: ConnectWidget
 }
 
 interface CommonParams {
@@ -19,20 +21,21 @@ interface CommonParams {
     halign?: 'start' | 'center' | 'end' | 'fill'
     valign?: 'start' | 'center' | 'end' | 'fill'
     connections?: (
-        [string, (...args: any[]) => any] |
-        [number, (...args: any[]) => any] |
-        [ServiceAPI, (...args: any[]) => any, string]
+        [string, (...args: unknown[]) => unknown] |
+        [number, (...args: unknown[]) => unknown] |
+        [Connectable, (...args: unknown[]) => unknown, string]
     )[]
-    properties?: [any, any][]
+    properties?: [prop: string, value: unknown][]
+    binds?: [prop: string, obj: Connectable, objProp?: string, signal?: string][],
     setup?: (widget: Gtk.Widget) => void
 }
 
 function separateCommon({
-    className, style, halign, valign, connections, properties, setup,
+    className, style, halign, valign, connections, properties, binds, setup,
     ...rest
 }: CommonParams) {
     return [
-        { className, style, halign, valign, connections, properties, setup },
+        { className, style, halign, valign, connections, properties, binds, setup },
         rest,
     ];
 }
@@ -128,8 +131,9 @@ function parseCommon(widget: Gtk.Widget, {
         setup(widget);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ctor = { new(...args: any[]): Gtk.Widget }
-export default function constructor(
+export function constructor(
     ctor: ctor,
     params: CommonParams | string = {},
 ) {
