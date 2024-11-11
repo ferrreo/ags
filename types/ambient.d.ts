@@ -57,6 +57,6 @@ declare module 'gi://Dbusmenu' {
 }
 
 declare module 'gi://DbusmenuGtk3' {
-  import Dbusmenu from '@girs/dbusmenugtk3-0.4';
-  export default DbusmenuGtk3;
+    import Dbusmenu from '@girs/dbusmenugtk3-0.4';
+    export default Dbusmenu;
 }
