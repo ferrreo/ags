@@ -72,6 +72,7 @@ export function bulkConnect(
     service: GObject.Object,
     list: [
         event: string,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         callback: (...args: any[]) => void
     ][],
 ) {
@@ -90,27 +91,38 @@ export function bulkDisconnect(service: GObject.Object, ids: number[]) {
 export function connect(
     service: GObject.Object,
     widget: Gtk.Widget,
-    callback: (widget: Gtk.Widget, ...args: any[]) => void,
+    callback: (widget: Gtk.Widget, ...args: unknown[]) => void,
     event = 'changed',
 ) {
     const bind = service.connect(
-        event, (_s, ...args: any[]) => callback(widget, ...args));
+        event, (_s, ...args: unknown[]) => callback(widget, ...args));
 
-    widget.connect('destroy', () => service.disconnect(bind));
-    timeout(10, () => callback(widget));
+    widget.connect('destroy', () => {
+        // @ts-expect-error
+        widget._destroyed = true;
+        service.disconnect(bind);
+    });
+    GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+        // @ts-expect-error
+        if (!widget._destroyed)
+            callback(widget);
+
+        return GLib.SOURCE_REMOVE;
+    });
 }
 
 export function interval(
     interval: number,
-    callback: () => void, widget: Gtk.Widget,
+    callback: () => void,
+    bind?: Gtk.Widget,
 ) {
     callback();
     const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, interval, () => {
         callback();
         return true;
     });
-    if (widget)
-        widget.connect('destroy', () => GLib.source_remove(id));
+    if (bind)
+        bind.connect('destroy', () => GLib.source_remove(id));
 
     return id;
 }
@@ -124,7 +136,7 @@ export function timeout(ms: number, callback: () => void) {
 
 export function runCmd(
     cmd: Command,
-    ...args: any[]
+    ...args: unknown[]
 ) {
     if (typeof cmd !== 'string' && typeof cmd !== 'function') {
         console.error('Command has to be string or function');
@@ -200,6 +212,7 @@ export function subprocess(
     cmd: string | string[],
     callback: (out: string) => void,
     onError = logError,
+    bind?: Gtk.Widget,
 ) {
     try {
         const read = (stdout: Gio.DataInputStream) => {
@@ -234,6 +247,10 @@ export function subprocess(
         });
 
         read(stdout);
+
+        if (bind)
+            bind.connect('destroy', () => proc.force_exit());
+
         return proc;
     } catch (e) {
         onError(e as Error);
